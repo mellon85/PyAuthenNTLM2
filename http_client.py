@@ -29,7 +29,7 @@ import urlparse
 def print_help():
     print
     print "Perform an authenticated HTTP GET request. Basic Authentication or NTLM can be used."
-    print "http_client {-u|--user} usr {-p|--password} pwd [{-d|--domain} DOMAIN] URL"
+    print "http_client {-u|--user} usr {-p|--password} pwd {-P|--proxy} proxy [{-d|--domain} DOMAIN] URL"
     print
     print "If the -d option is not provided, use Basic. If it is, use NTLM" 
     sys.exit(-1)
