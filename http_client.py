@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/pytho
 #
 # PyAuthenNTLM2: A mod-python module for Apache that carries out NTLM authentication
 #
@@ -34,96 +34,131 @@ def print_help():
     print "If the -d option is not provided, use Basic. If it is, use NTLM" 
     sys.exit(-1)
 
-headers = {}
-conn = None
 
-def basic_request(url, user, password, reuse=False):
-    global conn, headers
+def basic_request(url, user, password, proxy=None):
+    headers = {}
 
     if not url.startswith('http'):
         url = '//' + url
     (scheme, hostport, path, params, query, frag ) = urlparse.urlparse(url)
+    connect_hostport = hostport
 
-    if conn and not reuse:
-        conn.close()
-    if not conn or not reuse:
-        conn = httplib.HTTPConnection(hostport)
-    if reuse:
-        headers['Connection'] = 'Keep-alive'
-    else:
-        if 'Connection' in headers:
-            del headers['Connection']
+    if proxy:
+        if not url.startswith('http'):
+            url = '//' + url
+        (proxy_scheme, proxy_hostport, proxy_path, proxy_params,
+                proxy_query, proxy_frag ) = urlparse.urlparse(proxy)
+        connect_hostport = proxy_hostport
+
+    conn = httplib.HTTPConnection(connect_hostport)
+
+    if 'Connection' in headers:
+        del headers['Connection']
+    headers['Host'] = hostport
 
     conn.request('GET',path,None,headers)
     resp = conn.getresponse()
     resp.read()
+
+    if resp.status == 200:
+        print "No Authentication Required"
+        return False
     if resp.status<400:
         return 'Authorization' in headers
-    if resp.status!=401:
+
+    if resp.status not in (401, 407):
         print "Error in HTTP request", resp.status, resp.reason
         return False
-    if 'basic' not in resp.getheader('WWW-Authenticate').lower():
+    print "Authentication Required"
+
+    header = 'WWW-Authenticate'
+    if proxy:
+        header = 'proxy-authenticate'
+
+    if 'basic' not in resp.getheader(header).lower():
         print "Basic Authentication is not supported"
         return False
     conn.close()
 
-    # Process 401
-    conn = httplib.HTTPConnection(hostport)
+    # Process 401/407
+    conn = httplib.HTTPConnection(connect_hostport)
     auth = "Basic " + base64.b64encode(user+':'+password)
-    headers = { 'Authorization' : auth }
+
+    auth_header = 'Authorization'
+    if proxy:
+        auth_header = 'Proxy-Authorization'
+    headers = { auth_header : auth }
+    headers['Host'] = hostport
     conn.request('GET',path,None,headers)
     resp = conn.getresponse()
     resp.read()
     if not resp.status<400:
         print "Failed authentication for HTTP request", resp.status, resp.reason
         return False
-    if not reuse:
-        conn.close()
-        conn = False
     return True
 
-def ntlm_request(url, user, password, domain):
-    
+def ntlm_request(url, user, password, domain, proxy):
+
+    headers = {}
+
     if not url.startswith('http'):
         url = '//' + url
     (scheme, hostport, path, params, query, frag ) = urlparse.urlparse(url)
+    connect_hostport = hostport
+    authenticate_header = 'WWW-Authenticate'
+    auth_header = 'Authorization'
 
-    conn = httplib.HTTPConnection(hostport)
+    if proxy:
+        if not url.startswith('http'):
+            url = '//' + url
+        (proxy_scheme, proxy_hostport, proxy_path, proxy_params,
+                proxy_query, proxy_frag ) = urlparse.urlparse(proxy)
+        connect_hostport = proxy_hostport
+        auth_header = 'Proxy-Authorization'
+        authenticate_header = 'proxy-authenticate'
 
-    conn.request('GET',path)
+    conn = httplib.HTTPConnection(connect_hostport)
+
+    headers['Host'] = hostport
+    conn.request('GET',path,None,headers)
     resp = conn.getresponse()
     resp.read()
     if resp.status<400:
         return 'Authorization' in headers
-    if resp.status!=401:
+    elif resp.status not in (401, 407):
         print "Error in HTTP request", resp.status, resp.reason
         return False
-    if 'ntlm' not in resp.getheader('WWW-Authenticate').lower():
+
+    if 'ntlm' not in resp.getheader(authenticate_header).lower():
         print "NTLM Authentication is not supported"
         return False
     conn.close()
-    
-    # Process 401
-    conn = httplib.HTTPConnection(hostport)
+
+    # Process 401/407
+    conn = httplib.HTTPConnection(connect_hostport)
     client = NTLM_Client(user, domain, password)
 
     type1 = client.make_ntlm_negotiate()
     auth = "NTLM " + base64.b64encode(type1)
-    headers = { 'Authorization' : auth }
+
+    headers = {
+            auth_header : auth,
+            'Host': hostport }
     conn.request('GET',path,None,headers)
     resp = conn.getresponse()
     resp.read()
-    if resp.status!=401:
+    if resp.status not in (401, 407):
         print "First round NTLM authentication for HTTP request failed", resp.status, resp.reason
         return False
 
     # Extract Type2, respond to challenge
-    type2 = base64.b64decode(resp.getheader('WWW-Authenticate').split(' ')[1])
+    type2 = base64.b64decode(resp.getheader(authenticate_header).split(' ')[1])
     client.parse_ntlm_challenge(type2)
     type3 = client.make_ntlm_authenticate()
 
     auth = "NTLM " + base64.b64encode(type3)
-    headers = { 'Authorization' : auth }
+    headers = { auth_header : auth,
+            'Host': hostport }
     conn.request('GET',path,None,headers)
     resp = conn.getresponse()
     resp.read()
@@ -140,7 +175,8 @@ if __name__ == '__main__':
         print_help()
 
     try:
-        options, remain = getopt.getopt(sys.argv[1:],'hu:p:d:',['help', 'user=', 'password=', 'domain='])
+        options, remain = getopt.getopt(sys.argv[1:],'hu:p:d:P:',['help',
+            'user=', 'password=', 'domain=', 'proxy='])
     except getopt.GetoptError, err:
         print err.msg
         print_help()
@@ -159,30 +195,25 @@ if __name__ == '__main__':
             config['password'] = v
         elif o in ['-d', '--domain']:
             config['domain'] = v
+        elif o in ['-P', '--proxy']:
+            config['proxy'] = v
 
-    if len(config)==2:
-        if 'user' in config and 'password' in config:
-            config['scheme']='Basic'
-        else:
-            print 'For Basic authentication, specify only -u and -p\n\n'
-            print_help()
+    if 'user' in config and 'password' in config and 'domain' not in config:
+        config['scheme']='Basic'
+    elif 'user' in config and 'password' in config and 'domain' in config:
+        config['scheme']='NTLM'
     else:
-        if len(config)!=3:
-            print "Incorrect number of options specified."
-            print_help()
-        else:
-            config['scheme']='NTLM'
+        print "Incorrect number of options specified."
+        print_help()
 
     try:
         success = True
         if config['scheme']=='Basic':
-            for reuse in (False, True, True, False):
-                success &= basic_request(url, config['user'], config['password'], reuse)
-                if not success: break
+            success &= basic_request(url, config['user'],
+                    config['password'], config['proxy'])
         else:
-            for x in xrange(1,3):
-                success &= ntlm_request(url, config['user'], config['password'], config['domain'])
-                if not success: break
+            success &= ntlm_request(url, config['user'], config['password'],
+                    config['domain'], config['proxy'])
         if success:
             print "OK"
         else:
